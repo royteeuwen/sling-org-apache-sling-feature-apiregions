@@ -18,25 +18,9 @@
  */
 package org.apache.sling.feature.apiregions.impl;
 
-import java.lang.reflect.Array;
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Dictionary;
-import java.util.Hashtable;
-import java.util.Map;
-import java.util.logging.Level;
-import java.util.logging.Logger;
-
-import org.osgi.framework.BundleActivator;
-import org.osgi.framework.BundleContext;
-import org.osgi.framework.Constants;
-import org.osgi.framework.FrameworkEvent;
-import org.osgi.framework.FrameworkListener;
-import org.osgi.framework.ServiceReference;
-import org.osgi.framework.ServiceRegistration;
+import org.apache.felix.webconsole.WebConsoleConstants;
+import org.apache.sling.feature.apiregions.impl.console.RegionWebconsolePlugin;
+import org.osgi.framework.*;
 import org.osgi.framework.hooks.resolver.ResolverHookFactory;
 import org.osgi.framework.namespace.PackageNamespace;
 import org.osgi.framework.wiring.BundleCapability;
@@ -45,6 +29,15 @@ import org.osgi.resource.Requirement;
 import org.osgi.resource.Resource;
 import org.osgi.util.tracker.ServiceTracker;
 import org.osgi.util.tracker.ServiceTrackerCustomizer;
+
+import javax.servlet.Servlet;
+import java.lang.reflect.Array;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.*;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class Activator implements BundleActivator, FrameworkListener {
     static final String CONFIG_ADMIN_PKG_NAME = "org.osgi.service.cm";
@@ -66,6 +59,9 @@ public class Activator implements BundleActivator, FrameworkListener {
 
     ServiceTracker<Object, Object> configAdminTracker;
 
+    ServiceRegistration<Servlet> regionWebconsolePluginRegistration;
+    ServiceTracker<Object, Object> webconsoleTracker;
+
     @Override
     public synchronized void start(BundleContext context) throws Exception {
         bundleContext = context;
@@ -74,12 +70,14 @@ public class Activator implements BundleActivator, FrameworkListener {
 
         registerHook();
 
+        registerWebconsole();
+
         this.configAdminTracker = new ServiceTracker<>(context, CONFIG_ADMIN_CLASS_NAME, new ServiceTrackerCustomizer<Object, Object>() {
 
             @Override
             public Object addingService(final ServiceReference<Object> reference) {
                 final Object cfgAdmin = bundleContext.getService(reference);
-                if ( cfgAdmin != null ) {
+                if (cfgAdmin != null) {
                     return registerConfigurationListener(cfgAdmin);
                 }
                 return null;
@@ -92,14 +90,58 @@ public class Activator implements BundleActivator, FrameworkListener {
 
             @Override
             public void removedService(final ServiceReference<Object> reference, final Object reg) {
-                if ( reg != null ) {
-                    ((ServiceRegistration<?>)reg).unregister();
+                if (reg != null) {
+                    ((ServiceRegistration<?>) reg).unregister();
                 }
             }
         });
         this.configAdminTracker.open();
 
         context.addFrameworkListener(this);
+    }
+
+    private void registerWebconsole() {
+        if (webconsoleTracker == null) {
+            webconsoleTracker = new ServiceTracker<Object, Object>(
+                    bundleContext, "org.osgi.service.cm.ManagedService", null) {
+
+                @Override
+                public Object addingService(ServiceReference<Object> reference) {
+                    Object result = super.addingService(reference);
+                    if ("org.apache.felix.webconsole.internal.servlet.OsgiManager".equals(reference.getProperty("service.pid"))) {
+                        if (regionWebconsolePluginRegistration == null) {
+                            RegionWebconsolePlugin regionWebconsolePlugin = new RegionWebconsolePlugin();
+                            Dictionary<String, Object> properties = new Hashtable<>();
+                            properties.put(Constants.SERVICE_DESCRIPTION, "Apache Sling API Region Web Console Plugin");
+                            properties.put(WebConsoleConstants.PLUGIN_LABEL, RegionWebconsolePlugin.LABEL);
+                            properties.put(WebConsoleConstants.PLUGIN_TITLE, RegionWebconsolePlugin.TITLE);
+                            properties.put(WebConsoleConstants.PLUGIN_CATEGORY, "Sling");
+                            regionWebconsolePluginRegistration = bundleContext.registerService(Servlet.class, regionWebconsolePlugin, properties);
+                        }
+                    }
+                    return result;
+                }
+
+
+                /** This method is invoked when a service is removed. Since we model
+                 * a strong relationship between our component and the log service,
+                 * our component must be stopped when there's no log service left.
+                 * Note that the service tracker remains open (active). When a log
+                 * service becomes available again, our component will be restarted. */
+                @Override
+                public void removedService(ServiceReference<Object> reference,
+                                           Object service) {
+                    super.removedService(reference, service);
+                    if ("org.apache.felix.webconsole.internal.servlet.OsgiManager".equals(reference.getProperty("service.pid"))) {
+                        if (regionWebconsolePluginRegistration != null) {
+                            regionWebconsolePluginRegistration.unregister();
+                            regionWebconsolePluginRegistration = null;
+                        }
+                    }
+                }
+            };
+        }
+        webconsoleTracker.open();
     }
 
     @Override
@@ -109,8 +151,12 @@ public class Activator implements BundleActivator, FrameworkListener {
         if (configuration != null) {
             configuration.storeLocationToConfigMap(context);
         }
-        if ( this.configAdminTracker != null ) {
+        if (this.configAdminTracker != null) {
             this.configAdminTracker.close();
+        }
+
+        if (this.webconsoleTracker != null) {
+            this.webconsoleTracker.close();
         }
     }
 
@@ -171,21 +217,21 @@ public class Activator implements BundleActivator, FrameworkListener {
         try {
             ClassLoader loader = cap.getRevision().getWiring().getClassLoader();
             Class<?> msClass = loader.loadClass(MANAGED_SERVICE_CLASS_NAME);
-            Object ms = Proxy.newProxyInstance(loader, new Class[] {msClass}, new InvocationHandler() {
+            Object ms = Proxy.newProxyInstance(loader, new Class[]{msClass}, new InvocationHandler() {
                 @Override
                 public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
                     Class<?> mdDecl = method.getDeclaringClass();
                     if (mdDecl.equals(Object.class)) {
                         switch (method.getName()) {
-                            case "equals" :
+                            case "equals":
                                 return proxy == args[0];
-                            case "hashCode" :
+                            case "hashCode":
                                 return System.identityHashCode(proxy);
-                            case "toString" :
+                            case "toString":
                                 return "Proxy for " + msClass;
-                            default :
+                            default:
                                 throw new UnsupportedOperationException("Method " + method
-                                    + " not supported on proxy for " + msClass);
+                                        + " not supported on proxy for " + msClass);
                         }
                     }
                     if ("updated".equals(method.getName()) && args.length == 1) {
@@ -193,7 +239,7 @@ public class Activator implements BundleActivator, FrameworkListener {
                         if (arg == null) {
                             registerHook();
                         } else if (arg instanceof Dictionary) {
-                            Dictionary<?,?> props = (Dictionary<?,?>) args[0];
+                            Dictionary<?, ?> props = (Dictionary<?, ?>) args[0];
                             Object disabled = props.get("disable");
                             if ("true".equals(disabled)) {
                                 unregisterHook();
@@ -235,21 +281,21 @@ public class Activator implements BundleActivator, FrameworkListener {
             final Method cfgGetPropertiesMethod = cfgClass.getDeclaredMethod("getProperties");
             final Method cfgGetPidMethod = cfgClass.getDeclaredMethod("getPid");
 
-            Object msf = Proxy.newProxyInstance(listenerClass.getClassLoader(), new Class[] {listenerClass}, new InvocationHandler() {
+            Object msf = Proxy.newProxyInstance(listenerClass.getClassLoader(), new Class[]{listenerClass}, new InvocationHandler() {
                 @Override
                 public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
                     Class<?> mdDecl = method.getDeclaringClass();
                     if (mdDecl.equals(Object.class)) {
                         switch (method.getName()) {
-                            case "equals" :
+                            case "equals":
                                 return proxy == args[0];
-                            case "hashCode" :
+                            case "hashCode":
                                 return System.identityHashCode(proxy);
-                            case "toString" :
+                            case "toString":
                                 return "Proxy for " + listenerClass;
-                            default :
+                            default:
                                 throw new UnsupportedOperationException("Method " + method
-                                    + " not supported on proxy for " + listenerClass);
+                                        + " not supported on proxy for " + listenerClass);
                         }
                     }
                     if ("configurationEvent".equals(method.getName()) && args.length == 1) {
@@ -257,17 +303,16 @@ public class Activator implements BundleActivator, FrameworkListener {
                         final Object event = args[0];
 
                         // check factory pid first
-                        final String factoryPid = (String)eventGetFactoryPidMethod.invoke(event, (Object[])null);
-                        if ( FACTORY_PID.equals(factoryPid) ) {
-                            final String pid = (String)eventGetPidMethod.invoke(event, (Object[])null);
-                            final Object eventType = eventGetTypeMethod.invoke(event, (Object[])null);
+                        final String factoryPid = (String) eventGetFactoryPidMethod.invoke(event, (Object[]) null);
+                        if (FACTORY_PID.equals(factoryPid)) {
+                            final String pid = (String) eventGetPidMethod.invoke(event, (Object[]) null);
+                            final Object eventType = eventGetTypeMethod.invoke(event, (Object[]) null);
                             if (eventType.equals(1)) {
                                 // update
-                                final Object cfg = caGetConfigMethod.invoke(cfgAdmin, new Object[] {pid, null});
-                                @SuppressWarnings("unchecked")
-                                final Dictionary<String, Object> props = (Dictionary<String, Object>)cfgGetPropertiesMethod.invoke(cfg, (Object[])null);
+                                final Object cfg = caGetConfigMethod.invoke(cfgAdmin, new Object[]{pid, null});
+                                @SuppressWarnings("unchecked") final Dictionary<String, Object> props = (Dictionary<String, Object>) cfgGetPropertiesMethod.invoke(cfg, (Object[]) null);
                                 configuration.setConfig(pid, props);
-                            } else if ( eventType.equals(2)) {
+                            } else if (eventType.equals(2)) {
                                 // delete
                                 configuration.removeConfig(pid);
                             }
@@ -279,12 +324,11 @@ public class Activator implements BundleActivator, FrameworkListener {
             final ServiceRegistration<?> reg = bundleContext.registerService(CFG_LISTENER_CLASS_NAME, msf, null);
             // get existing configurations
             final Object result = caListConfigcMethod.invoke(cfgAdmin, "(service.factoryPid=" + FACTORY_PID + ")");
-            if ( result != null ) {
-                for(int i=0; i<Array.getLength(result); i++) {
+            if (result != null) {
+                for (int i = 0; i < Array.getLength(result); i++) {
                     final Object cfg = Array.get(result, i);
-                    final String pid = (String)cfgGetPidMethod.invoke(cfg, (Object[])null);
-                    @SuppressWarnings("unchecked")
-                    final Dictionary<String, Object> props = (Dictionary<String, Object>)cfgGetPropertiesMethod.invoke(cfg, (Object[])null);
+                    final String pid = (String) cfgGetPidMethod.invoke(cfg, (Object[]) null);
+                    @SuppressWarnings("unchecked") final Dictionary<String, Object> props = (Dictionary<String, Object>) cfgGetPropertiesMethod.invoke(cfg, (Object[]) null);
                     configuration.setConfig(pid, props);
                 }
             }
